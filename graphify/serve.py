@@ -9,22 +9,25 @@ from graphify.security import sanitize_label
 from graphify.build import edge_data
 
 
+def _load_graph_or_raise(graph_path: str) -> nx.Graph:
+    resolved = Path(graph_path).resolve()
+    if resolved.suffix != ".json":
+        raise ValueError(f"Graph path must be a .json file, got: {graph_path!r}")
+    if not resolved.exists():
+        raise FileNotFoundError(f"Graph file not found: {resolved}")
+    data = json.loads(resolved.read_text(encoding="utf-8"))
+    if "links" not in data and "edges" in data:
+        data = dict(data, links=data["edges"])
+    data = {**data, "directed": True}
+    try:
+        return json_graph.node_link_graph(data, edges="links")
+    except TypeError:
+        return json_graph.node_link_graph(data)
+
+
 def _load_graph(graph_path: str) -> nx.Graph:
     try:
-        resolved = Path(graph_path).resolve()
-        if resolved.suffix != ".json":
-            raise ValueError(f"Graph path must be a .json file, got: {graph_path!r}")
-        if not resolved.exists():
-            raise FileNotFoundError(f"Graph file not found: {resolved}")
-        safe = resolved
-        data = json.loads(safe.read_text(encoding="utf-8"))
-        if "links" not in data and "edges" in data:
-            data = dict(data, links=data["edges"])
-        data = {**data, "directed": True}
-        try:
-            return json_graph.node_link_graph(data, edges="links")
-        except TypeError:
-            return json_graph.node_link_graph(data)
+        return _load_graph_or_raise(graph_path)
     except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -41,6 +44,46 @@ def _communities_from_graph(G: nx.Graph) -> dict[int, list[str]]:
         if cid is not None:
             communities.setdefault(int(cid), []).append(node_id)
     return communities
+
+
+class _ReloadingGraph:
+    """Load a graph.json and refresh it when the file changes on disk.
+
+    Long-lived MCP stdio sessions should see updates to graph.json without
+    restarting the MCP client or gateway. If a later reload fails while the file
+    is being rewritten, keep serving the last successfully loaded graph.
+    """
+
+    def __init__(self, graph_path: str):
+        self.path = Path(graph_path).resolve()
+        self._signature: tuple[int, int] | None = None
+        self._graph: nx.Graph | None = None
+        self._communities: dict[int, list[str]] = {}
+
+    def _file_signature(self) -> tuple[int, int]:
+        stat = self.path.stat()
+        return stat.st_mtime_ns, stat.st_size
+
+    def get(self) -> tuple[nx.Graph, dict[int, list[str]]]:
+        signature = self._file_signature()
+        if self._graph is not None and signature == self._signature:
+            return self._graph, self._communities
+
+        try:
+            graph = _load_graph_or_raise(str(self.path))
+        except Exception as exc:
+            if self._graph is None:
+                raise
+            print(
+                f"warning: could not reload graph {self.path}: {exc}; keeping previous graph",
+                file=sys.stderr,
+            )
+            return self._graph, self._communities
+
+        self._graph = graph
+        self._communities = _communities_from_graph(graph)
+        self._signature = signature
+        return self._graph, self._communities
 
 
 def _strip_diacritics(text: str) -> str:
@@ -332,8 +375,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
     except ImportError as e:
         raise ImportError("mcp not installed. Run: pip install mcp") from e
 
-    G = _load_graph(graph_path)
-    communities = _communities_from_graph(G)
+    graph_store = _ReloadingGraph(graph_path)
 
     server = Server("graphify")
 
@@ -416,6 +458,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         ]
 
     def _tool_query_graph(arguments: dict) -> str:
+        G, _ = graph_store.get()
         question = arguments["question"]
         mode = arguments.get("mode", "bfs")
         depth = min(int(arguments.get("depth", 3)), 6)
@@ -431,6 +474,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         )
 
     def _tool_get_node(arguments: dict) -> str:
+        G, _ = graph_store.get()
         label = arguments["label"].lower()
         matches = [(nid, d) for nid, d in G.nodes(data=True)
                    if label in (d.get("label") or "").lower() or label == nid.lower()]
@@ -448,6 +492,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         ])
 
     def _tool_get_neighbors(arguments: dict) -> str:
+        G, _ = graph_store.get()
         label = arguments["label"].lower()
         rel_filter = arguments.get("relation_filter", "").lower()
         matches = _find_node(G, label)
@@ -476,6 +521,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         return "\n".join(lines)
 
     def _tool_get_community(arguments: dict) -> str:
+        G, communities = graph_store.get()
         cid = int(arguments["community_id"])
         nodes = communities.get(cid, [])
         if not nodes:
@@ -491,6 +537,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         return "\n".join(lines)
 
     def _tool_god_nodes(arguments: dict) -> str:
+        G, _ = graph_store.get()
         from .analyze import god_nodes as _god_nodes
         nodes = _god_nodes(G, top_n=int(arguments.get("top_n", 10)))
         lines = ["God nodes (most connected):"]
@@ -498,6 +545,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         return "\n".join(lines)
 
     def _tool_graph_stats(_: dict) -> str:
+        G, communities = graph_store.get()
         confs = [d.get("confidence", "EXTRACTED") for _, _, d in G.edges(data=True)]
         total = len(confs) or 1
         return (
@@ -510,6 +558,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         )
 
     def _tool_shortest_path(arguments: dict) -> str:
+        G, _ = graph_store.get()
         src_scored = _score_nodes(G, [t.lower() for t in arguments["source"].split()])
         tgt_scored = _score_nodes(G, [t.lower() for t in arguments["target"].split()])
         if not src_scored:
@@ -574,7 +623,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         "shortest_path": _tool_shortest_path,
     }
 
-    def _load_community_labels() -> dict[int, str]:
+    def _load_community_labels(communities: dict[int, list[str]]) -> dict[int, str]:
         labels_path = Path(graph_path).parent / ".graphify_labels.json"
         if labels_path.exists():
             try:
@@ -608,6 +657,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
             return _tool_god_nodes({"top_n": 10})
         if uri_str == "graphify://surprises":
             try:
+                G, communities = graph_store.get()
                 from graphify.analyze import surprising_connections
                 surprises = surprising_connections(G, communities, top_n=10)
                 if not surprises:
@@ -619,6 +669,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
             except Exception as exc:
                 return f"Could not compute surprising connections: {exc}"
         if uri_str == "graphify://audit":
+            G, _ = graph_store.get()
             confs = [d.get("confidence", "EXTRACTED") for _, _, d in G.edges(data=True)]
             total = len(confs) or 1
             return (
@@ -629,8 +680,9 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
             )
         if uri_str == "graphify://questions":
             try:
+                G, communities = graph_store.get()
                 from graphify.analyze import suggest_questions
-                community_labels = _load_community_labels()
+                community_labels = _load_community_labels(communities)
                 questions = suggest_questions(G, communities, community_labels, top_n=10)
                 if not questions:
                     return "No suggested questions available."

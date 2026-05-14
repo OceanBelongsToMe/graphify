@@ -15,6 +15,7 @@ from graphify.serve import (
     _resolve_context_filters,
     _subgraph_to_text,
     _load_graph,
+    _ReloadingGraph,
 )
 
 
@@ -196,3 +197,24 @@ def test_load_graph_missing_file(tmp_path):
     graphify_dir.mkdir()
     with pytest.raises(SystemExit):
         _load_graph(str(graphify_dir / "nonexistent.json"))
+
+
+def test_reloading_graph_refreshes_when_file_changes(tmp_path):
+    G1 = nx.Graph()
+    G1.add_node("n1", label="before", community=0)
+    p = tmp_path / "graph.json"
+    p.write_text(json.dumps(json_graph.node_link_data(G1, edges="links")))
+
+    store = _ReloadingGraph(str(p))
+    loaded1, communities1 = store.get()
+    assert loaded1.number_of_nodes() == 1
+    assert communities1 == {0: ["n1"]}
+
+    G2 = nx.Graph()
+    G2.add_node("n1", label="before", community=0)
+    G2.add_node("n2", label="after", community=1)
+    p.write_text(json.dumps(json_graph.node_link_data(G2, edges="links")))
+
+    loaded2, communities2 = store.get()
+    assert loaded2.number_of_nodes() == 2
+    assert communities2 == {0: ["n1"], 1: ["n2"]}
