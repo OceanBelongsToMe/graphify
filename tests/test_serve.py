@@ -199,22 +199,56 @@ def test_load_graph_missing_file(tmp_path):
         _load_graph(str(graphify_dir / "nonexistent.json"))
 
 
+# --- #874: MCP hot-reload ---
+
+def _write_graph(path, nodes: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"nodes": [{"id": n, "label": n} for n in nodes], "edges": []}),
+        encoding="utf-8",
+    )
+
+
 def test_reloading_graph_refreshes_when_file_changes(tmp_path):
-    G1 = nx.Graph()
-    G1.add_node("n1", label="before", community=0)
-    p = tmp_path / "graph.json"
-    p.write_text(json.dumps(json_graph.node_link_data(G1, edges="links")))
+    graph_path = tmp_path / "graph.json"
+    _write_graph(graph_path, ["before"])
 
-    store = _ReloadingGraph(str(p))
-    loaded1, communities1 = store.get()
-    assert loaded1.number_of_nodes() == 1
-    assert communities1 == {0: ["n1"]}
+    store = _ReloadingGraph(str(graph_path))
+    G1, communities1 = store.get()
+    assert set(G1.nodes()) == {"before"}
+    assert communities1 == {}
 
-    G2 = nx.Graph()
-    G2.add_node("n1", label="before", community=0)
-    G2.add_node("n2", label="after", community=1)
-    p.write_text(json.dumps(json_graph.node_link_data(G2, edges="links")))
+    _write_graph(graph_path, ["after", "extra"])
+    G2, communities2 = store.get()
 
-    loaded2, communities2 = store.get()
-    assert loaded2.number_of_nodes() == 2
-    assert communities2 == {0: ["n1"], 1: ["n2"]}
+    assert set(G2.nodes()) == {"after", "extra"}
+    assert communities2 == {}
+
+
+def test_reloading_graph_keeps_previous_graph_on_bad_rewrite(tmp_path, capsys):
+    graph_path = tmp_path / "graph.json"
+    _write_graph(graph_path, ["stable"])
+
+    store = _ReloadingGraph(str(graph_path))
+    G1, _ = store.get()
+    assert set(G1.nodes()) == {"stable"}
+
+    graph_path.write_text("{bad json", encoding="utf-8")
+    G2, _ = store.get()
+
+    assert set(G2.nodes()) == {"stable"}
+    assert "could not reload graph" in capsys.readouterr().err
+
+
+def test_reloading_graph_stat_key_changes_on_rewrite(tmp_path):
+    graph_path = tmp_path / "graph.json"
+    _write_graph(graph_path, ["a"])
+    s1 = graph_path.stat()
+    key1 = (s1.st_mtime_ns, s1.st_size)
+
+    _write_graph(graph_path, ["aa", "bb"])
+    s2 = graph_path.stat()
+    key2 = (s2.st_mtime_ns, s2.st_size)
+
+    assert key1 != key2, "stat key must change when file content changes"
+

@@ -367,6 +367,8 @@ def _filter_blank_stdin() -> None:
 
 def serve(graph_path: str = "graphify-out/graph.json") -> None:
     """Start the MCP server. Requires pip install mcp."""
+    import threading
+
     try:
         from mcp.server import Server
         from mcp.server.stdio import stdio_server
@@ -645,6 +647,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
 
     @server.read_resource()
     async def read_resource(uri: AnyUrl) -> str:
+        _maybe_reload()
         uri_str = str(uri)
         if uri_str == "graphify://report":
             report_path = Path(graph_path).parent / "GRAPH_REPORT.md"
@@ -699,6 +702,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+        _maybe_reload()
         handler = _handlers.get(name)
         if not handler:
             return [types.TextContent(type="text", text=f"Unknown tool: {name}")]

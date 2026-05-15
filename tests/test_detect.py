@@ -47,11 +47,17 @@ def test_detect_warns_small_corpus():
     assert result["needs_graph"] is False
     assert result["warning"] is not None
 
-def test_detect_skips_dotfiles():
+def test_detect_skips_noise_dot_dirs():
+    """Noise dot dirs (.next, .nuxt, .graphify cache, …) are skipped (#873).
+    Non-noise dot dirs (.github, .claude, …) are now allowed through."""
     result = detect(FIXTURES)
     for files in result["files"].values():
         for f in files:
-            assert "/." not in f
+            # graphify's own cache is always skipped
+            assert "/.graphify/" not in f
+            # well-known framework caches are always skipped
+            for noise in ("/.next/", "/.nuxt/", "/.turbo/", "/.angular/"):
+                assert noise not in f
 
 
 def test_classify_md_paper_by_signals(tmp_path):
@@ -230,7 +236,11 @@ def test_detect_incremental_propagates_follow_symlinks(tmp_path, monkeypatch):
     (real_dir / "note.md").write_text("# real note\n\nsome content")
     (tmp_path / "linked_corpus").symlink_to(real_dir)
 
-    manifest_path = str(tmp_path / "manifest.json")
+    # Store manifest inside graphify-out/ so it is pruned by _SKIP_DIRS
+    # and doesn't get re-detected as a code file now that .json is indexed.
+    manifest_dir = tmp_path / "graphify-out"
+    manifest_dir.mkdir()
+    manifest_path = str(manifest_dir / "manifest.json")
 
     # Without following symlinks, the symlinked dir contents are invisible.
     no_link = detect_incremental(tmp_path, manifest_path, follow_symlinks=False)
@@ -316,3 +326,93 @@ def test_detect_video_not_in_words(tmp_path):
     result = detect(tmp_path)
     # Only video file present — total_words should be 0
     assert result["total_words"] == 0
+
+
+def test_detect_skips_coverage_dir(tmp_path):
+    """coverage/ and lcov-report/ are noise dirs — HTML reports inside must be excluded (#870)."""
+    cov = tmp_path / "coverage" / "lcov-report"
+    cov.mkdir(parents=True)
+    (cov / "index.html").write_text("<html>coverage report</html>")
+    (cov / "src.ts.html").write_text("<html>file coverage</html>")
+    (tmp_path / "main.py").write_text("def hello(): pass")
+    result = detect(tmp_path)
+    all_files = [f for files in result["files"].values() for f in files]
+    cov_prefix = str(tmp_path / "coverage")
+    assert not any(f.startswith(cov_prefix) for f in all_files)
+    assert any("main.py" in f for f in all_files)
+
+
+def test_detect_skips_visual_tests_dir(tmp_path):
+    """visual-tests/ bundles and snapshots are noise — must be excluded (#869)."""
+    vt = tmp_path / "visual-tests"
+    vt.mkdir()
+    (vt / "bundle.js").write_text("var u3=function(){};var d2=function(){}")
+    (vt / "screens.tsx").write_text("export const Screen = () => <div/>")
+    (tmp_path / "app.py").write_text("def main(): pass")
+    result = detect(tmp_path)
+    all_files = [f for files in result["files"].values() for f in files]
+    assert not any("visual-tests" in f for f in all_files)
+    assert any("app.py" in f for f in all_files)
+
+
+def test_detect_skips_snapshots_dir(tmp_path):
+    """__snapshots__/ and snapshots/ are jest/vitest artefacts — must be excluded."""
+    (tmp_path / "__snapshots__").mkdir()
+    (tmp_path / "__snapshots__" / "app.test.ts.snap").write_text("// Jest Snapshot\nexports[`test 1`] = `<div/>`")
+    (tmp_path / "app.ts").write_text("export function greet() { return 'hi'; }")
+    result = detect(tmp_path)
+    all_files = [f for files in result["files"].values() for f in files]
+    assert not any("__snapshots__" in f for f in all_files)
+    assert any("app.ts" in f for f in all_files)
+
+
+def test_detect_skips_storybook_static_dir(tmp_path):
+    """storybook-static/ is a build artefact — must be excluded."""
+    sb = tmp_path / "storybook-static"
+    sb.mkdir()
+    (sb / "index.html").write_text("<html>storybook</html>")
+    (sb / "main.js").write_text("(function(){var s=1;})()")
+    (tmp_path / "Button.tsx").write_text("export const Button = () => <button/>")
+    result = detect(tmp_path)
+    all_files = [f for files in result["files"].values() for f in files]
+    assert not any("storybook-static" in f for f in all_files)
+    assert any("Button.tsx" in f for f in all_files)
+
+
+# --- #873: dot dirs allowed, framework caches blocked ---
+
+def test_detect_allows_github_dir(tmp_path):
+    """Files inside .github/ (workflows etc.) are now indexed (#873)."""
+    gh = tmp_path / ".github" / "workflows"
+    gh.mkdir(parents=True)
+    (gh / "ci.yml").write_text("name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n")
+    (tmp_path / "main.py").write_text("def run(): pass")
+    result = detect(tmp_path)
+    all_files = [f for files in result["files"].values() for f in files]
+    assert any(".github" in f for f in all_files), "expected .github/workflows/ci.yml to be detected"
+
+
+def test_detect_skips_next_cache(tmp_path):
+    """.next/ (Next.js build cache) must be excluded even after dot-dir fix (#873)."""
+    next_dir = tmp_path / ".next" / "cache"
+    next_dir.mkdir(parents=True)
+    (next_dir / "build.js").write_text("(function(){var s=1;})()")
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "index.tsx").write_text("export default function Home() { return <div/> }")
+    result = detect(tmp_path)
+    all_files = [f for files in result["files"].values() for f in files]
+    assert not any(".next" in f for f in all_files)
+    assert any("index.tsx" in f for f in all_files)
+
+
+def test_detect_skips_graphify_own_cache(tmp_path):
+    """.graphify/ (extraction cache) must never be re-indexed as source (#873)."""
+    cache = tmp_path / ".graphify" / "cache"
+    cache.mkdir(parents=True)
+    (cache / "abc123.json").write_text('{"nodes": [], "edges": []}')
+    (tmp_path / "app.py").write_text("def go(): pass")
+    result = detect(tmp_path)
+    all_files = [f for files in result["files"].values() for f in files]
+    assert not any(".graphify" in f for f in all_files)
+    assert any("app.py" in f for f in all_files)
