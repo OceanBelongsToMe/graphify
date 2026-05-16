@@ -252,3 +252,14 @@ def test_reloading_graph_stat_key_changes_on_rewrite(tmp_path):
 
     assert key1 != key2, "stat key must change when file content changes"
 
+
+def test_serve_uses_reloading_graph_without_dangling_maybe_reload_hook():
+    """Regression: merged hot-reload implementations must not leave dead hooks."""
+    import inspect
+    import graphify.serve as serve_module
+
+    source = inspect.getsource(serve_module.serve)
+
+    assert "graph_store = _ReloadingGraph(graph_path)" in source
+    assert "_maybe_reload()" not in source
+
