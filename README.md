@@ -174,7 +174,7 @@ Run this once in your project after building a graph:
 | Pi coding agent | `graphify pi install` |
 | Google Antigravity | `graphify antigravity install` |
 
-This writes a small config file that tells your assistant to read `GRAPH_REPORT.md` before answering questions about your codebase. On platforms that support hooks (Claude Code, Codex, Gemini CLI), a hook fires automatically before every file-read call — your assistant navigates by the graph instead of grepping through everything.
+This writes a small config file that tells your assistant to consult the knowledge graph for codebase questions — preferring scoped queries like `graphify query "<question>"` over reading the full report or grepping raw files. On platforms that support payload-bearing hooks (Claude Code, Gemini CLI), a hook fires automatically before search-style tool calls and nudges your assistant toward the graph path. On the others (Codex, OpenCode, Cursor, etc.), the persistent instruction files (`AGENTS.md`, `.cursor/rules/`, etc.) provide the same query-first guidance. `GRAPH_REPORT.md` is still available for broad architecture review.
 
 To remove graphify from all platforms at once: `graphify uninstall` (add `--purge` to also delete `graphify-out/`). Or use the per-platform command (e.g. `graphify claude uninstall`).
 
@@ -240,6 +240,11 @@ graphify export callflow-html      # Mermaid architecture/call-flow HTML (auto-r
 
 graphify hook install              # auto-rebuild on git commit
 graphify merge-graphs a.json b.json              # combine two graphs
+
+graphify prs                       # PR dashboard: CI state, review status, worktree mapping
+graphify prs 42                    # deep dive on PR #42 with graph impact
+graphify prs --triage              # AI ranks your review queue (uses whatever backend is configured)
+graphify prs --conflicts           # PRs sharing graph communities — merge-order risk
 ```
 
 See the [full command reference](#full-command-reference) below.
@@ -297,7 +302,7 @@ python -m graphify.serve graphify-out/graph.json
 kimi mcp add --transport stdio graphify -- python -m graphify.serve graphify-out/graph.json
 ```
 
-The MCP server gives your assistant structured access: `query_graph`, `get_node`, `get_neighbors`, `shortest_path`.
+The MCP server gives your assistant structured access: `query_graph`, `get_node`, `get_neighbors`, `shortest_path`, `list_prs`, `get_pr_impact`, `triage_prs`.
 
 > **WSL / Linux note:** Ubuntu ships `python3`, not `python`. Use a venv to avoid conflicts:
 > ```bash
@@ -315,6 +320,7 @@ These are only needed for **headless / CI extraction** (`graphify extract`). Whe
 | `ANTHROPIC_API_KEY` | Claude (Anthropic) backend | `--backend claude` |
 | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Google Gemini backend | `--backend gemini` |
 | `OPENAI_API_KEY` | OpenAI or OpenAI-compatible APIs | `--backend openai` |
+| `DEEPSEEK_API_KEY` | DeepSeek backend | `--backend deepseek` |
 | `MOONSHOT_API_KEY` | Kimi Code backend | `--backend kimi` |
 | `OLLAMA_BASE_URL` | Ollama local inference URL | `--backend ollama` (default: `http://localhost:11434`) |
 | `OLLAMA_MODEL` | Ollama model name | `--backend ollama` (default: auto-detect) |
@@ -326,6 +332,8 @@ These are only needed for **headless / CI extraction** (`graphify extract`). Whe
 | `GRAPHIFY_API_TIMEOUT` | HTTP timeout in seconds (default: 600) | optional — also `--api-timeout` flag |
 | `GRAPHIFY_FORCE` | Force graph rebuild even with fewer nodes | optional — also `--force` flag |
 | `GRAPHIFY_GOOGLE_WORKSPACE` | Auto-enable Google Workspace export | optional — set to `1` |
+| `GRAPHIFY_TRIAGE_BACKEND` | Backend for `graphify prs --triage` | optional — auto-detected from available keys |
+| `GRAPHIFY_TRIAGE_MODEL` | Model override for triage | optional — e.g. `claude-opus-4-7` |
 
 ---
 
@@ -333,7 +341,7 @@ These are only needed for **headless / CI extraction** (`graphify extract`). Whe
 
 - **Code files** — processed locally via tree-sitter. Nothing leaves your machine.
 - **Video / audio** — transcribed locally with faster-whisper. Nothing leaves your machine.
-- **Docs, PDFs, images** — sent to your AI assistant for semantic extraction (via the `/graphify` skill, using whatever model your IDE session runs). Headless `graphify extract` requires `GEMINI_API_KEY` / `GOOGLE_API_KEY` (Gemini), `MOONSHOT_API_KEY` (Kimi), `ANTHROPIC_API_KEY` (Claude), `OPENAI_API_KEY` (OpenAI), a running Ollama instance (`OLLAMA_BASE_URL`), AWS credentials via the standard provider chain (Bedrock - no API key needed, uses IAM), or the `claude` CLI binary (Claude Code - no API key needed, uses your Claude subscription). The `--dedup-llm` flag uses the same key.
+- **Docs, PDFs, images** — sent to your AI assistant for semantic extraction (via the `/graphify` skill, using whatever model your IDE session runs). Headless `graphify extract` requires `GEMINI_API_KEY` / `GOOGLE_API_KEY` (Gemini), `MOONSHOT_API_KEY` (Kimi), `ANTHROPIC_API_KEY` (Claude), `OPENAI_API_KEY` (OpenAI), `DEEPSEEK_API_KEY` (DeepSeek), a running Ollama instance (`OLLAMA_BASE_URL`), AWS credentials via the standard provider chain (Bedrock - no API key needed, uses IAM), or the `claude` CLI binary (Claude Code - no API key needed, uses your Claude subscription). The `--dedup-llm` flag uses the same key.
 - No telemetry, no usage tracking, no analytics.
 
 ---
@@ -443,7 +451,7 @@ graphify kiro install / uninstall
 graphify antigravity install / uninstall
 
 graphify extract ./docs                        # headless LLM extraction for CI (no IDE needed)
-graphify extract ./docs --backend gemini       # explicit backend: gemini, kimi, claude, openai, ollama, bedrock, or claude-cli
+graphify extract ./docs --backend gemini       # explicit backend: gemini, kimi, claude, openai, deepseek, ollama, bedrock, or claude-cli
 graphify extract ./docs --backend gemini --model gemini-3.1-pro-preview
 graphify extract ./docs --backend ollama       # local Ollama (set OLLAMA_BASE_URL / OLLAMA_MODEL) - no API key needed for loopback
 GRAPHIFY_OLLAMA_NUM_CTX=32768 graphify extract ./docs --backend ollama   # override KV-cache window (auto-sized by default)
@@ -470,6 +478,15 @@ graphify global add graphify-out/graph.json myrepo   # register a project graph 
 graphify global remove myrepo                         # remove a project from the global graph
 graphify global list                                  # show all registered repos + node/edge counts
 graphify global path                                  # print path to the global graph file
+
+graphify prs                              # PR dashboard: CI, review, worktree, graph impact
+graphify prs 42                           # deep dive on PR #42
+graphify prs --triage                     # AI triage ranking (auto-detects backend from env)
+graphify prs --worktrees                  # worktree → branch → PR mapping
+graphify prs --conflicts                  # PRs sharing graph communities (merge-order risk)
+graphify prs --base main                  # filter to PRs targeting a specific base branch
+graphify prs --repo owner/repo            # run against a different GitHub repo
+GRAPHIFY_TRIAGE_BACKEND=kimi graphify prs --triage   # use a specific backend for triage
 
 graphify clone https://github.com/karpathy/nanoGPT
 graphify merge-graphs a.json b.json --out merged.json
