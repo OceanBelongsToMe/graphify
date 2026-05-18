@@ -311,6 +311,7 @@ When the user types `/graphify`, invoke the `skill` tool with `skill: "graphify"
 
 Rules:
 - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
@@ -1761,11 +1762,21 @@ def main() -> None:
         args = sys.argv[2:]
         watch_path: Path | None = None
         graph_override: Path | None = None
+        co_resolution: float = 1.0
+        co_exclude_hubs: float | None = None
         i_arg = 0
         while i_arg < len(args):
             a = args[i_arg]
             if a == "--graph" and i_arg + 1 < len(args):
                 graph_override = Path(args[i_arg + 1]); i_arg += 2
+            elif a == "--resolution" and i_arg + 1 < len(args):
+                co_resolution = float(args[i_arg + 1]); i_arg += 2
+            elif a.startswith("--resolution="):
+                co_resolution = float(a.split("=", 1)[1]); i_arg += 1
+            elif a == "--exclude-hubs" and i_arg + 1 < len(args):
+                co_exclude_hubs = float(args[i_arg + 1]); i_arg += 2
+            elif a.startswith("--exclude-hubs="):
+                co_exclude_hubs = float(a.split("=", 1)[1]); i_arg += 1
             elif a == "--no-viz" or a.startswith("--min-community-size="):
                 i_arg += 1
             elif a.startswith("--"):
@@ -1792,7 +1803,7 @@ def main() -> None:
         G = build_from_json(_raw, directed=_directed)
         print(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
         print("Re-clustering...")
-        communities = cluster(G)
+        communities = cluster(G, resolution=co_resolution, exclude_hubs_percentile=co_exclude_hubs)
         cohesion = score_all(G, communities)
         gods = god_nodes(G)
         surprises = surprising_connections(G, communities)
@@ -2415,6 +2426,9 @@ def main() -> None:
         cli_token_budget: int | None = None
         cli_max_concurrency: int | None = None
         cli_api_timeout: float | None = None
+        # Clustering tuning knobs
+        cli_resolution: float = 1.0
+        cli_exclude_hubs: float | None = None
 
         def _parse_int(name: str, raw: str) -> int:
             try:
@@ -2480,6 +2494,14 @@ def main() -> None:
                 cli_api_timeout = _parse_float("--api-timeout", args[i + 1]); i += 2
             elif a.startswith("--api-timeout="):
                 cli_api_timeout = _parse_float("--api-timeout", a.split("=", 1)[1]); i += 1
+            elif a == "--resolution" and i + 1 < len(args):
+                cli_resolution = _parse_float("--resolution", args[i + 1]); i += 2
+            elif a.startswith("--resolution="):
+                cli_resolution = _parse_float("--resolution", a.split("=", 1)[1]); i += 1
+            elif a == "--exclude-hubs" and i + 1 < len(args):
+                cli_exclude_hubs = float(args[i + 1]); i += 2
+            elif a.startswith("--exclude-hubs="):
+                cli_exclude_hubs = float(a.split("=", 1)[1]); i += 1
             else:
                 i += 1
 
@@ -2796,7 +2818,7 @@ def main() -> None:
             )
             sys.exit(1)
 
-        communities = _cluster(G)
+        communities = _cluster(G, resolution=cli_resolution, exclude_hubs_percentile=cli_exclude_hubs)
         cohesion = _score_all(G, communities)
         try:
             gods = _god_nodes(G)
