@@ -2,6 +2,33 @@
 
 Full release notes with details on each version: [GitHub Releases](https://github.com/safishamsi/graphify/releases)
 
+## 0.8.14 (2026-05-20)
+
+- Fix: `--wiki` crash when community node IDs are stale after dedup or re-extract — stale IDs are now silently dropped with a stderr warning; raises a clear error only if every ID is stale (#936)
+- Fix: `.gitignore` patterns now respected when no `.graphifyignore` exists — previous behaviour silently ignored the project's gitignore, causing expected exclusions to be skipped (#945)
+- Feat: `--exclude <pattern>` CLI flag to pass extra gitignore-style exclusion patterns at runtime without modifying `.graphifyignore` (#947)
+- Fix: `.worktrees/` directory now skipped during scan — git worktree sibling checkouts inside `.worktrees/` were previously indexed as duplicate source (#947)
+- Security: NAT64 IPv6 addresses (`64:ff9b::/96`) no longer false-positive as blocked reserved IPs — affects hosts like `arxiv.org` on IPv6-only networks where the ISP uses RFC 6052 NAT64
+
+## 0.8.13 (2026-05-18)
+
+- Fix: node ID collisions across same-named files in different directories — SQL extractor and Python import resolver now use directory-qualified stems (`dir_file_entity`) instead of bare filename stems, preventing silent node merging on repos with duplicate filenames (#1A, #1B)
+- Perf: stat-based mtime fastpath for `file_hash` — skips full SHA256 read when file size+mtime_ns unchanged, same trade-off as make; index flushed atomically via atexit
+- Fix: absolute `source_file` paths from semantic subagents no longer stored in graph — `build_from_json`, `build`, and `build_merge` accept a `root` param and relativize paths at build time (#932)
+- Fix: failed semantic chunks no longer permanently freeze their files in the manifest — only files that appear in extraction output get `semantic_hash` stamped; failed-chunk files keep empty `semantic_hash` and are re-queued on next run (#933)
+- Feat: `graphify cache-check`, `graphify merge-chunks`, `graphify merge-semantic` CLI subcommands expose cache and merge logic as library-callable commands for skill pipelines
+
+## 0.8.12 (2026-05-18)
+
+- Security: `_is_sensitive` now correctly flags underscore-prefixed secret filenames (`api_token.txt`, `oauth_token.json`) — `\b` word boundary was treating `_` as a word char, so names like `api_token` never matched (#920)
+- Security: `_is_sensitive` now checks parent directories against a `_SENSITIVE_DIRS` blocklist (`.ssh`, `.aws`, `.gcloud`, `secrets`, etc.) so any file inside those dirs is skipped regardless of name; root-level files named `credentials` or `secrets` are no longer falsely flagged (#920)
+- Fix: `--wiki` Relationships section was always empty — `_cross_community_links` read `community` from node attributes (always None) instead of the `communities` dict; `_god_node_article` had the same bug and never linked to the owning community (#925)
+- Fix: `--watch` now respects `.graphifyignore` — the event handler was checking extensions before the ignore filter, so paths inside `node_modules/`, `.venv/`, etc. triggered rebuilds (#928)
+- Fix: `graphify <path>` now correctly dispatches to `graphify extract <path>` — previously a bare path argument returned "unknown command" instead of starting extraction
+- Fix: skill fast path — if `graphify-out/graph.json` already exists and the request is a natural-language question, extraction steps are skipped entirely and `graphify query` runs immediately; previously the skill re-ran detect and hit the corpus-size gate on every question
+- Fix: large-corpus gate raised from 200 to 500 files; `detect()` now returns `scan_root` so the skill correctly computes relative subdirectory breakdowns instead of showing absolute paths; flat repos with no subdirectories no longer ask the user to pick a subfolder that doesn't exist
+- Docs: clarify that code-only corpora skip the LLM semantic extraction pass entirely — AST handles code, Pass 3 is reserved for docs, papers, images, and transcripts (#836)
+
 ## 0.8.11 (2026-05-18)
 
 - Fix: LLM empty choices / None message guard — Gemini and other providers return `choices=[]` on content-filtered HTTP 200 responses; now raises a clean error instead of crashing with IndexError (#924)

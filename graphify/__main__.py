@@ -1808,6 +1808,7 @@ def main() -> None:
         gods = god_nodes(G)
         surprises = surprising_connections(G, communities)
         out = watch_path / "graphify-out"
+        out.mkdir(parents=True, exist_ok=True)
         labels_path = out / ".graphify_labels.json"
         if labels_path.exists():
             try:
@@ -1825,6 +1826,8 @@ def main() -> None:
                           tokens, str(watch_path), suggested_questions=questions,
                           min_community_size=min_community_size, built_at_commit=_commit)
         (out / "GRAPH_REPORT.md").write_text(report, encoding="utf-8")
+        from graphify.export import backup_if_protected as _backup
+        _backup(out)
         to_json(G, communities, str(out / "graph.json"))
         labels_path.write_text(json.dumps({str(k): v for k, v in labels.items()}, ensure_ascii=False), encoding="utf-8")
 
@@ -2429,6 +2432,7 @@ def main() -> None:
         # Clustering tuning knobs
         cli_resolution: float = 1.0
         cli_exclude_hubs: float | None = None
+        cli_excludes: list[str] = []
 
         def _parse_int(name: str, raw: str) -> int:
             try:
@@ -2502,6 +2506,10 @@ def main() -> None:
                 cli_exclude_hubs = float(args[i + 1]); i += 2
             elif a.startswith("--exclude-hubs="):
                 cli_exclude_hubs = float(a.split("=", 1)[1]); i += 1
+            elif a == "--exclude" and i + 1 < len(args):
+                cli_excludes.append(args[i + 1]); i += 2
+            elif a.startswith("--exclude="):
+                cli_excludes.append(a.split("=", 1)[1]); i += 1
             else:
                 i += 1
 
@@ -2608,10 +2616,11 @@ def main() -> None:
                 target,
                 manifest_path=str(manifest_path),
                 google_workspace=google_workspace or None,
+                extra_excludes=cli_excludes or None,
             )
         else:
             print(f"[graphify extract] scanning {target}")
-            detection = _detect(target, google_workspace=google_workspace or None)
+            detection = _detect(target, google_workspace=google_workspace or None, extra_excludes=cli_excludes or None)
 
         files_by_type = detection.get("files", {})
         if incremental_mode:
@@ -2750,9 +2759,27 @@ def main() -> None:
         graph_json_path = graphify_out / "graph.json"
         analysis_path = graphify_out / ".graphify_analysis.json"
 
+        # Build a manifest-safe files dict: only stamp semantic_hash for files
+        # that actually produced output (cache hit or fresh extraction). Files
+        # whose chunk failed have no source_file entry in sem_result — leaving
+        # their semantic_hash empty so detect_incremental re-queues them (#933).
+        _sem_extracted: set[str] = {
+            n.get("source_file", "") for n in sem_result.get("nodes", [])
+        } | {
+            e.get("source_file", "") for e in sem_result.get("edges", [])
+        }
+        _sem_extracted.discard("")
+        _sem_types = {"document", "paper", "image"}
+        _manifest_files = {
+            ftype: [f for f in flist if ftype not in _sem_types or f in _sem_extracted]
+            for ftype, flist in files_by_type.items()
+        }
+
         if no_cluster:
             # --no-cluster: dump the raw merged extraction as graph.json.
             # No NetworkX, no community detection, no analysis sidecar.
+            from graphify.export import backup_if_protected as _backup
+            _backup(graphify_out)
             graph_json_path.write_text(
                 json.dumps(merged, indent=2), encoding="utf-8"
             )
@@ -2772,7 +2799,7 @@ def main() -> None:
                     f"est. cost: ${cost:.4f}"
                 )
             try:
-                _save_manifest(files_by_type, manifest_path=str(manifest_path), kind="both")
+                _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both")
             except Exception as exc:
                 print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
             if global_merge:
@@ -2806,9 +2833,10 @@ def main() -> None:
                 prune_sources=deleted_files or None,
                 dedup=True,
                 dedup_llm_backend=dedup_backend,
+                root=target,
             )
         else:
-            G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend)
+            G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend, root=target)
         if G.number_of_nodes() == 0:
             print(
                 "[graphify extract] graph is empty — extraction produced no nodes. "
@@ -2829,7 +2857,13 @@ def main() -> None:
         except Exception:
             surprises = []
 
+        from graphify.export import backup_if_protected as _backup
+        _backup(graphify_out)
         _to_json(G, communities, str(graph_json_path), force=True)
+        if merged.get("output_tokens", 0) > 0:
+            (graphify_out / ".graphify_semantic_marker").write_text(
+                json.dumps({"output_tokens": merged["output_tokens"]}), encoding="utf-8"
+            )
         if global_merge:
             from graphify.global_graph import global_add as _global_add
             _tag = global_repo_tag or target.name
@@ -2854,7 +2888,7 @@ def main() -> None:
         }
         analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
         try:
-            _save_manifest(files_by_type, manifest_path=str(manifest_path), kind="both")
+            _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both")
         except Exception as exc:
             print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
 
@@ -2882,6 +2916,135 @@ def main() -> None:
                 f"est. cost (~{backend}): ${cost:.4f}"
             )
 
+    elif cmd == "cache-check":
+        # graphify cache-check <files_from> [--root <dir>]
+        # Reads file paths (one per line) from <files_from>, checks semantic cache.
+        # Writes:
+        #   graphify-out/.graphify_cached.json   — already-cached nodes/edges/hyperedges
+        #   graphify-out/.graphify_uncached.txt  — paths that need extraction
+        # Stdout: "Cache: N hit, M miss"
+        from graphify.cache import check_semantic_cache
+        if len(sys.argv) < 3:
+            print("Usage: graphify cache-check <files_from> [--root <dir>]", file=sys.stderr)
+            sys.exit(1)
+        files_from = Path(sys.argv[2])
+        root = Path(".")
+        i = 3
+        while i < len(sys.argv):
+            if sys.argv[i] == "--root" and i + 1 < len(sys.argv):
+                root = Path(sys.argv[i + 1])
+                i += 2
+            else:
+                i += 1
+        files = [f for f in files_from.read_text(encoding="utf-8").splitlines() if f.strip()]
+        cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(files, root)
+        out = root / "graphify-out"
+        out.mkdir(parents=True, exist_ok=True)
+        if cached_nodes or cached_edges or cached_hyperedges:
+            (out / ".graphify_cached.json").write_text(
+                json.dumps({"nodes": cached_nodes, "edges": cached_edges, "hyperedges": cached_hyperedges},
+                           ensure_ascii=False),
+                encoding="utf-8",
+            )
+        (out / ".graphify_uncached.txt").write_text("\n".join(uncached), encoding="utf-8")
+        print(f"Cache: {len(files) - len(uncached)} hit, {len(uncached)} miss")
+
+    elif cmd == "merge-chunks":
+        # graphify merge-chunks <chunk_glob_or_files...> --out <path>
+        # Concatenates .graphify_chunk_*.json files written by semantic subagents.
+        # Deduplicates nodes by id (first writer wins). Sums token counts.
+        import glob as _glob
+        if len(sys.argv) < 3:
+            print("Usage: graphify merge-chunks <chunk_files...> --out <path>", file=sys.stderr)
+            sys.exit(1)
+        out_path: Path | None = None
+        chunk_args: list[str] = []
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--out" and i + 1 < len(sys.argv):
+                out_path = Path(sys.argv[i + 1])
+                i += 2
+            else:
+                chunk_args.append(sys.argv[i])
+                i += 1
+        if not out_path:
+            print("error: --out <path> required", file=sys.stderr)
+            sys.exit(1)
+        chunk_files: list[str] = []
+        for arg in chunk_args:
+            expanded = _glob.glob(arg)
+            chunk_files.extend(sorted(expanded) if expanded else [arg])
+        merged: dict = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0}
+        seen_ids: set[str] = set()
+        for cf in chunk_files:
+            try:
+                chunk = json.loads(Path(cf).read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"[graphify merge-chunks] warning: skipping {cf}: {exc}", file=sys.stderr)
+                continue
+            for n in chunk.get("nodes", []):
+                if n.get("id") not in seen_ids:
+                    seen_ids.add(n["id"])
+                    merged["nodes"].append(n)
+            merged["edges"].extend(chunk.get("edges", []))
+            merged["hyperedges"].extend(chunk.get("hyperedges", []))
+            merged["input_tokens"] += chunk.get("input_tokens", 0)
+            merged["output_tokens"] += chunk.get("output_tokens", 0)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+        print(
+            f"Merged {len(chunk_files)} chunks: {merged['nodes']} nodes, {len(merged['edges'])} edges, "
+            f"{merged['input_tokens']:,} in / {merged['output_tokens']:,} out tokens"
+        )
+
+    elif cmd == "merge-semantic":
+        # graphify merge-semantic --cached <path> --new <path> --out <path>
+        # Merges cached semantic results with freshly-extracted chunk results.
+        # Deduplicates nodes by id (cached entries take priority over new ones).
+        if len(sys.argv) < 3:
+            print("Usage: graphify merge-semantic --cached <path> --new <path> --out <path>", file=sys.stderr)
+            sys.exit(1)
+        cached_path: Path | None = None
+        new_path: Path | None = None
+        out_path2: Path | None = None
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--cached" and i + 1 < len(sys.argv):
+                cached_path = Path(sys.argv[i + 1]); i += 2
+            elif sys.argv[i] == "--new" and i + 1 < len(sys.argv):
+                new_path = Path(sys.argv[i + 1]); i += 2
+            elif sys.argv[i] == "--out" and i + 1 < len(sys.argv):
+                out_path2 = Path(sys.argv[i + 1]); i += 2
+            else:
+                i += 1
+        if not out_path2:
+            print("error: --out <path> required", file=sys.stderr)
+            sys.exit(1)
+        empty: dict = {"nodes": [], "edges": [], "hyperedges": []}
+        cached_data = json.loads(cached_path.read_text(encoding="utf-8")) if cached_path and cached_path.exists() else empty
+        new_data = json.loads(new_path.read_text(encoding="utf-8")) if new_path and new_path.exists() else empty
+        seen_ids2: set[str] = set()
+        all_nodes: list[dict] = []
+        for n in cached_data.get("nodes", []) + new_data.get("nodes", []):
+            if n.get("id") not in seen_ids2:
+                seen_ids2.add(n["id"])
+                all_nodes.append(n)
+        merged2 = {
+            "nodes": all_nodes,
+            "edges": cached_data.get("edges", []) + new_data.get("edges", []),
+            "hyperedges": cached_data.get("hyperedges", []) + new_data.get("hyperedges", []),
+        }
+        out_path2.parent.mkdir(parents=True, exist_ok=True)
+        out_path2.write_text(json.dumps(merged2, ensure_ascii=False), encoding="utf-8")
+        print(f"Merged: {len(merged2['nodes'])} nodes, {len(merged2['edges'])} edges")
+
+    elif Path(cmd).exists() or cmd in (".", "..") or cmd.startswith(("./", "../", "/", "~")):
+        # User ran `graphify <path>` directly — treat as `graphify extract <path>`.
+        # Common when following the PowerShell note in README (`graphify .`) or
+        # copy-pasting skill invocations without the leading slash.
+        sys.argv.insert(2, sys.argv[1])
+        sys.argv[1] = "extract"
+        main()
     else:
         print(f"error: unknown command '{cmd}'", file=sys.stderr)
         print("Run 'graphify --help' for usage.", file=sys.stderr)

@@ -109,7 +109,14 @@ def _git_head() -> str | None:
         return None
 
 
-from graphify.detect import CODE_EXTENSIONS, DOC_EXTENSIONS, PAPER_EXTENSIONS, IMAGE_EXTENSIONS
+from graphify.detect import (
+    CODE_EXTENSIONS,
+    DOC_EXTENSIONS,
+    PAPER_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    _load_graphifyignore,
+    _is_ignored,
+)
 
 _WATCHED_EXTENSIONS = CODE_EXTENSIONS | DOC_EXTENSIONS | PAPER_EXTENSIONS | IMAGE_EXTENSIONS
 _CODE_EXTENSIONS = CODE_EXTENSIONS
@@ -536,6 +543,8 @@ def _rebuild_code(
         else:
             if not _check_shrink(force, existing_graph_data, candidate_graph_data, tmp=graph_tmp):
                 return False
+            from graphify.export import backup_if_protected as _backup
+            _backup(out)
             graph_tmp.replace(existing_graph)
             report_path.write_text(report, encoding="utf-8")
             labels_file.write_text(labels_json, encoding="utf-8")
@@ -647,12 +656,28 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
     pending: bool = False
     changed: set[Path] = set()
 
+    # Load .graphifyignore patterns ONCE at startup so the handler does not
+    # re-parse the file on every filesystem event. Watchdog's handler runs on
+    # the observer thread and is invoked for every event the OS delivers
+    # (Time Machine writes, Docker/Colima VM I/O, Spotlight indexing, …) —
+    # without this short-circuit a busy volume can saturate a CPU core
+    # discarding events one extension at a time. (gh-928)
+    watch_root_for_ignore = watch_path.resolve()
+    ignore_patterns = _load_graphifyignore(watch_root_for_ignore)
+
     class Handler(FileSystemEventHandler):
         def on_any_event(self, event):
             nonlocal last_trigger, pending
             if event.is_directory:
                 return
             path = Path(event.src_path)
+            # Check .graphifyignore BEFORE the extension/dotfile/out filters so
+            # the cheapest short-circuit for users with broad ignore patterns
+            # (node_modules/, .venv/, build/, …) fires first. _is_ignored
+            # tolerates absolute paths outside watch_root via its internal
+            # relative_to guard, so a stray symlinked event won't raise.
+            if ignore_patterns and _is_ignored(path, watch_root_for_ignore, ignore_patterns):
+                return
             if path.suffix.lower() not in _WATCHED_EXTENSIONS:
                 return
             if any(part.startswith(".") for part in path.parts):
