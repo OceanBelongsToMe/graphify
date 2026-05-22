@@ -53,6 +53,20 @@ def test_openai_backend_detected(monkeypatch):
     assert llm._get_backend_api_key("openai") == "openai-key"
 
 
+def test_openai_base_url_can_be_overridden_by_openai_base_url_env(tmp_path, monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1")
+    source = tmp_path / "note.md"
+    source.write_text("# Architecture\n")
+    result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 1, "output_tokens": 1}
+
+    with patch("graphify.llm._call_openai_compat", return_value=result) as call:
+        llm.extract_files_direct([source], backend="openai", root=tmp_path)
+
+    assert call.call_args.args[0] == "https://example.test/v1"
+
+
 def test_extract_files_direct_routes_gemini_through_openai_compat(tmp_path, monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")

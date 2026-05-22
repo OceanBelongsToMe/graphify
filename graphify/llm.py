@@ -80,7 +80,7 @@ BACKENDS: dict[str, dict] = {
         "max_completion_tokens": 16384,
     },
     "openai": {
-        "base_url": "https://api.openai.com/v1",
+        "base_url": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         "default_model": "gpt-4.1-mini",
         "env_key": "OPENAI_API_KEY",
         "model_env_key": "GRAPHIFY_OPENAI_MODEL",
@@ -247,6 +247,14 @@ def _default_model_for_backend(backend: str) -> str:
         if model:
             return model
     return cfg["default_model"]
+
+
+def _base_url_for_backend(backend: str) -> str:
+    """Return backend base URL, honoring documented env overrides."""
+    cfg = BACKENDS[backend]
+    if backend == "openai":
+        return os.environ.get("OPENAI_BASE_URL") or cfg["base_url"]
+    return cfg.get("base_url", "")
 
 
 def _call_openai_compat(
@@ -576,7 +584,7 @@ def extract_files_direct(
     if backend == "bedrock":
         return _call_bedrock(mdl, user_msg, max_tokens=max_out)
     return _call_openai_compat(
-        cfg["base_url"],
+        _base_url_for_backend(backend),
         key,
         mdl,
         user_msg,
