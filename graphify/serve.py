@@ -445,7 +445,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         from mcp import types
         from mcp.types import AnyUrl
     except ImportError as e:
-        raise ImportError("mcp not installed. Run: pip install mcp") from e
+        raise ImportError('mcp not installed. Run: pip install "graphifyy[mcp]"') from e
 
     graph_store = _ReloadingGraph(graph_path)
 
@@ -656,7 +656,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
 
     def _tool_god_nodes(arguments: dict) -> str:
         G, _ = graph_store.get()
-        from .analyze import god_nodes as _god_nodes
+        from graphify.analyze import god_nodes as _god_nodes
         nodes = _god_nodes(G, top_n=int(arguments.get("top_n", 10)))
         lines = ["God nodes (most connected):"]
         lines += [f"  {i}. {n['label']} - {n['degree']} edges" for i, n in enumerate(nodes, 1)]
