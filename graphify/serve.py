@@ -657,12 +657,15 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
 
     def _tool_query_graph(arguments: dict) -> str:
         G, _ = graph_store.get()
+        import time as _time
+        from graphify import querylog
         question = arguments["question"]
         mode = arguments.get("mode", "bfs")
         depth = min(int(arguments.get("depth", 3)), 6)
         budget = int(arguments.get("token_budget", 2000))
         context_filter = arguments.get("context_filter")
-        return _query_graph_text(
+        _t0 = _time.perf_counter()
+        result = _query_graph_text(
             G,
             question,
             mode=mode,
@@ -670,6 +673,17 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
             token_budget=budget,
             context_filters=context_filter,
         )
+        querylog.log_query(
+            kind="mcp_query",
+            question=question,
+            corpus=str(graph_path),
+            result=result,
+            mode=mode,
+            depth=depth,
+            token_budget=budget,
+            duration_ms=(_time.perf_counter() - _t0) * 1000,
+        )
+        return result
 
     def _tool_get_node(arguments: dict) -> str:
         G, _ = graph_store.get()
