@@ -330,7 +330,9 @@ def test_serve_uses_reloading_graph_without_dangling_maybe_reload_hook():
     import inspect
     import graphify.serve as serve_module
 
-    source = inspect.getsource(serve_module.serve)
+    # Upstream refactored serve() to delegate to _build_server(); the
+    # _ReloadingGraph instantiation now lives there.
+    source = inspect.getsource(serve_module._build_server)
 
     assert "graph_store = _ReloadingGraph(graph_path)" in source
     assert "_maybe_reload()" not in source
